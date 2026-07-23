@@ -1,0 +1,9 @@
+# Register interest in Python interpreter changes (Python 3.9 for now); and
+# don't make the Python package dependent on the virtualenv package
+# processing (noawait)
+interest-noawait /usr/bin/python3.11
+
+# Also provide a symbolic trigger for all dh-virtualenv packages
+interest dh-virtualenv-interpreter-update
+# Triggers added by dh_makeshlibs/13.11.4
+activate-noawait ldconfig

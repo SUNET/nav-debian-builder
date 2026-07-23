@@ -1,0 +1,13 @@
+# Automatically added by dh_installinit/13.11.4
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ] ; then
+	if [ -z "${DPKG_ROOT:-}" ] && [ -x "/etc/init.d/nav" ]; then
+		update-rc.d nav defaults >/dev/null
+		if [ -n "$2" ]; then
+			_dh_action=restart
+		else
+			_dh_action=start
+		fi
+		invoke-rc.d nav $_dh_action || exit 1
+	fi
+fi
+# End automatically added section
