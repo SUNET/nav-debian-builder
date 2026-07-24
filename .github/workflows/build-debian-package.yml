@@ -1,0 +1,209 @@
+---
+# Build a NAV Debian package.
+
+name: Build Debian package
+
+on:
+  # Automatic: build whenever the packaging repo changes on main.
+  push:
+    branches:
+    - main
+  # On-demand: run manually from the Actions tab with custom inputs.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Debian package version (e.g. 5.15.0-1). Leave empty to derive from upstream.'
+        required: false
+        default: ''
+      upstream_ref:
+        description: 'Branch/tag/commit of Uninett/nav to build.'
+        required: false
+        default: 'master'
+      message:
+        description: 'Changelog message.'
+        required: false
+        default: 'Automated GitHub build'
+      debian_release:
+        description: 'Target Debian release (docker base image).'
+        required: false
+        default: 'bookworm'
+      publish_release:
+        description: 'Publish the .deb as a GitHub Release asset (otherwise artifact-only).'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  build:
+    name: "Build NAV Debian package"
+    runs-on: ubuntu-latest
+
+    # Needed to publish the .deb as a GitHub Release asset.
+    permissions:
+      contents: write
+
+    env:
+      # Mirrors the defaults / env of build-from-git-source.sh. Inputs override
+      # them when the workflow is triggered manually; on push the defaults apply.
+      UPSTREAM_URL: 'https://github.com/Uninett/nav.git'
+      UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'master' }}
+      DEBIAN_RELEASE: ${{ github.event.inputs.debian_release || 'bookworm' }}
+      MESSAGE: ${{ github.event.inputs.message || 'Automated GitHub build' }}
+      DEBEMAIL: 'noreply@uninett.no'
+      DEBFULLNAME: 'Automated GitHub build'
+
+    steps:
+    # ------------------------------------------------------------------
+    # Check out THIS packaging repo. It IS the debian/ folder that gets
+    # overlaid onto the upstream source tree.
+    # ------------------------------------------------------------------
+    - name: Checkout packaging repo
+      uses: actions/checkout@v4
+      with:
+        path: packaging
+
+    # ------------------------------------------------------------------
+    # Clone the upstream NAV source and check out the requested ref.
+    #    (Equivalent to step 1 in the script.)
+    # ------------------------------------------------------------------
+    - name: Clone upstream NAV source
+      run: |
+        set -eux
+        mkdir -p build
+        git clone "$UPSTREAM_URL" build/nav
+        git -C build/nav fetch --tags origin
+        git -C build/nav checkout -f "$UPSTREAM_REF"
+        git -C build/nav reset --hard "$UPSTREAM_REF"
+        # Drop any leftover debian/ or quilt state before overlaying:
+        rm -rf build/nav/debian build/nav/.pc
+
+    # ------------------------------------------------------------------
+    # Overlay THIS repo's packaging files as debian/, minus the build
+    #    helper scripts (same exclusions the script makes).
+    # ------------------------------------------------------------------
+    - name: Overlay packaging files as debian/
+      run: |
+        set -eux
+        cp -a packaging build/nav/debian
+        rm -rf build/nav/debian/.git
+        rm -f  build/nav/debian/clone-and-build.sh \
+               build/nav/debian/build-from-git-source.sh \
+               build/nav/debian/build.sh \
+               build/nav/debian/build_test.sh \
+               build/nav/debian/dev.sh \
+               build/nav/debian/dch.sh \
+               build/nav/debian/Dockerfile 2>/dev/null || true
+
+    # ------------------------------------------------------------------
+    # Resolve the package version.
+    #   - workflow_dispatch: use the 'version' input if given.
+    #   - otherwise (push, or empty input): derive from the upstream ref,
+    #     suffixed with the run number so builds are distinct.
+    # ------------------------------------------------------------------
+    - name: Resolve package version
+      id: version
+      run: |
+        set -eux
+        VERSION='${{ github.event.inputs.version }}'
+        if [ -z "$VERSION" ]; then
+          DESC="$(git -C build/nav describe --tags --always)"
+          VERSION="${DESC}-1+gh${GITHUB_RUN_NUMBER}"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo ">>> Package version: $VERSION"
+
+    # ------------------------------------------------------------------
+    # Cache pip downloads (dh_virtualenv fetches Python deps at build time).
+    # ------------------------------------------------------------------
+    - name: Prepare pip cache
+      run: mkdir -p "$HOME/.cache"
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ env.DEBIAN_RELEASE }}-${{ hashFiles('build/nav/requirements.txt', 'build/nav/requirements/*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ env.DEBIAN_RELEASE }}-
+          ${{ runner.os }}-pip-
+
+    # ------------------------------------------------------------------
+    # Build the per-release Docker build environment (build-arg only;
+    #    no source is COPYed in). Same as `docker build` in the script.
+    # ------------------------------------------------------------------
+    - name: Build Docker build environment
+      run: |
+        set -eux
+        docker build \
+          --build-arg "DEBIAN_RELEASE=$DEBIAN_RELEASE" \
+          -t "nav-debbuild-$DEBIAN_RELEASE" \
+          packaging
+
+    # ------------------------------------------------------------------
+    # Build the package inside the container.
+    #    - source tree bind-mounted, not copied
+    #    - version set with dch (no git-derived version)
+    #    - BINARY-ONLY (-b) build to bypass the 3.0 (quilt) source check and
+    #      the upstream-tag requirement in gbp.conf
+    # ------------------------------------------------------------------
+    - name: Build package inside container
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        set -eux
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          --volume "$PWD/build:/build" \
+          --volume "$HOME/.cache:/home/.cache" \
+          --workdir "/build/nav" \
+          --env "DEBEMAIL=$DEBEMAIL" \
+          --env "DEBFULLNAME=$DEBFULLNAME" \
+          "nav-debbuild-$DEBIAN_RELEASE" \
+          sh -e -c "
+            set -x
+            dch --create --package nav -v '$VERSION' --distribution unstable \
+                '$MESSAGE' 2>/dev/null || \
+            dch -b -v '$VERSION' --distribution unstable '$MESSAGE'
+            dpkg-buildpackage -b -us -uc -ui -i -I
+          "
+
+    # ------------------------------------------------------------------
+    # Collect and upload the resulting .deb as a downloadable artifact for testing.
+    # ------------------------------------------------------------------
+    - name: Prepare package artifacts
+      run: |
+        set -eux
+        mkdir -p artifacts
+        mv build/nav_* artifacts/ 2>/dev/null || true
+        ls -l artifacts
+
+    - name: Upload package artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nav-debian-package-${{ env.DEBIAN_RELEASE }}-${{ steps.version.outputs.version }}
+        path: artifacts/nav_*
+        if-no-files-found: error
+
+    # ------------------------------------------------------------------
+    # Optionally publish the .deb as a GitHub Release so it is durably
+    #    downloadable (survives artifact retention limits, reachable via a
+    #    stable /releases/download/<tag>/<file>.deb URL).
+    # ------------------------------------------------------------------
+    - name: Publish package to GitHub Release
+      if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: nav-${{ env.DEBIAN_RELEASE }}-${{ steps.version.outputs.version }}
+        name: "NAV ${{ steps.version.outputs.version }} (${{ env.DEBIAN_RELEASE }})"
+        body: |
+          Automated NAV Debian package build.
+
+          - Version: `${{ steps.version.outputs.version }}`
+          - Target Debian release: `${{ env.DEBIAN_RELEASE }}`
+          - Upstream ref: `${{ env.UPSTREAM_REF }}`
+
+          Install on a matching Debian host:
+
+              sudo apt install -y ./nav_${{ steps.version.outputs.version }}_amd64.deb
+        files: artifacts/nav_*
+        fail_on_unmatched_files: true
