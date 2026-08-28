@@ -46,7 +46,7 @@ UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/Uninett/nav.git}"
 WORKDIR="${WORKDIR:-$(pwd)/../build}"
 # Target Debian release. This is the docker base image (bookworm, trixie, ...).
 # It determines what release the .deb is built for.
-DEBIAN_RELEASE="${DEBIAN_RELEASE:-bookworm}"
+DEBIAN_RELEASE="${DEBIAN_RELEASE:-trixie}"
 # Docker image tag for the build environment (per-release, so images don't clash):
 IMAGE="${IMAGE:-nav-debbuild-$DEBIAN_RELEASE}"
 
@@ -101,17 +101,44 @@ echo ">>> Overlaying packaging files into $SRC_DIR/debian"
 cp -a "$PKG_DEBIAN_DIR" "$SRC_DIR/debian"
 # Don't ship the build helper scripts inside the package tree:
 rm -f "$SRC_DIR/debian/clone-and-build.sh" \
+      "$SRC_DIR/debian/build-from-git-source.sh" \
       "$SRC_DIR/debian/build.sh" \
       "$SRC_DIR/debian/build_test.sh" \
       "$SRC_DIR/debian/dev.sh" \
       "$SRC_DIR/debian/dch.sh" \
       "$SRC_DIR/debian/Dockerfile" 2>/dev/null || true
+# The flavours/ tree carries per-release overrides; don't ship it in debian/:
+rm -rf "$SRC_DIR/debian/flavours"
+
+# ---------------------------------------------------------------------------
+# 2b. Apply the per-release flavour overrides (control, changelog).
+#     The Dockerfile flavour is selected in step 3. If no flavour exists for
+#     this release, the shared root files (overlaid above) are used as-is.
+# ---------------------------------------------------------------------------
+FLAVOUR_DIR="$PKG_DEBIAN_DIR/flavours/$DEBIAN_RELEASE"
+if [ -d "$FLAVOUR_DIR" ]; then
+    echo ">>> Applying flavour overrides from $FLAVOUR_DIR"
+    if [ -f "$FLAVOUR_DIR/control" ]; then
+        cp -a "$FLAVOUR_DIR/control" "$SRC_DIR/debian/control"
+    fi
+    if [ -f "$FLAVOUR_DIR/changelog" ]; then
+        cp -a "$FLAVOUR_DIR/changelog" "$SRC_DIR/debian/changelog"
+    fi
+else
+    echo ">>> No flavour dir for '$DEBIAN_RELEASE'; using shared root files."
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Build the Docker image (build environment only; no source is COPYed in)
 # ---------------------------------------------------------------------------
+# Prefer the per-release flavour Dockerfile; fall back to the shared one.
+DOCKERFILE="$PKG_DEBIAN_DIR/Dockerfile"
+if [ -f "$FLAVOUR_DIR/Dockerfile" ]; then
+    DOCKERFILE="$FLAVOUR_DIR/Dockerfile"
+fi
 echo ">>> Building Docker build environment ($IMAGE) for $DEBIAN_RELEASE"
-docker build --build-arg "DEBIAN_RELEASE=$DEBIAN_RELEASE" -t "$IMAGE" "$PKG_DEBIAN_DIR"
+echo ">>> Using Dockerfile: $DOCKERFILE"
+docker build --build-arg "DEBIAN_RELEASE=$DEBIAN_RELEASE" -f "$DOCKERFILE" -t "$IMAGE" "$PKG_DEBIAN_DIR"
 
 # ---------------------------------------------------------------------------
 # 4. Run the build inside the container

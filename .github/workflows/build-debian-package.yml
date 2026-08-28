@@ -1,5 +1,10 @@
 ---
 # Build a NAV Debian package.
+# TODO: Trigger build on:
+# - Releases
+# - Merge to master
+# - Build based on the nav repository sunet-forked on GitHub (Uninett/nav) instead of the upstream GitLab repo.
+
 
 name: Build Debian package
 
@@ -24,9 +29,9 @@ on:
         required: false
         default: 'Automated GitHub build'
       debian_release:
-        description: 'Target Debian release (docker base image).'
+        description: 'Target Debian release: a single release (e.g. trixie, bookworm) or "all".'
         required: false
-        default: 'bookworm'
+        default: 'trixie'
       publish_release:
         description: 'Publish the .deb as a GitHub Release asset (otherwise artifact-only).'
         type: boolean
@@ -34,9 +39,43 @@ on:
         default: false
 
 jobs:
-  build:
-    name: "Build NAV Debian package"
+  # --------------------------------------------------------------------
+  # Compute the build matrix of Debian releases.
+  #   - push:            build ALL supported releases.
+  #   - workflow_dispatch: build the chosen release, or ALL if "all".
+  # The list of supported releases is the source of truth here; add a new
+  # release to SUPPORTED (and create flavours/<release>/) to build it.
+  # --------------------------------------------------------------------
+  prepare:
+    name: "Compute release matrix"
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+    - name: Determine releases to build
+      id: set
+      env:
+        REQUESTED: ${{ github.event.inputs.debian_release || 'all' }}
+      run: |
+        set -eux
+        SUPPORTED='["bookworm","trixie"]'
+        if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
+          MATRIX="$SUPPORTED"
+        else
+          MATRIX="[\"$REQUESTED\"]"
+        fi
+        echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+        echo ">>> Building releases: $MATRIX"
+
+  build:
+    name: "Build NAV Debian package (${{ matrix.debian_release }})"
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        debian_release: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     # Needed to publish the .deb as a GitHub Release asset.
     permissions:
@@ -47,7 +86,7 @@ jobs:
       # them when the workflow is triggered manually; on push the defaults apply.
       UPSTREAM_URL: 'https://github.com/Uninett/nav.git'
       UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'master' }}
-      DEBIAN_RELEASE: ${{ github.event.inputs.debian_release || 'bookworm' }}
+      DEBIAN_RELEASE: ${{ matrix.debian_release }}
       MESSAGE: ${{ github.event.inputs.message || 'Automated GitHub build' }}
       DEBEMAIL: 'noreply@uninett.no'
       DEBFULLNAME: 'Automated GitHub build'
@@ -93,6 +132,31 @@ jobs:
                build/nav/debian/dev.sh \
                build/nav/debian/dch.sh \
                build/nav/debian/Dockerfile 2>/dev/null || true
+        # The flavours/ tree carries per-release overrides; it must not be
+        # shipped inside the package's debian/ dir.
+        rm -rf build/nav/debian/flavours
+
+    # ------------------------------------------------------------------
+    # Apply the per-release flavour overrides (control, changelog). The
+    #    Dockerfile flavour is handled in the "Build Docker build environment"
+    #    step. If no flavour exists for this release, the shared root files
+    #    (already overlaid above) are used as-is.
+    # ------------------------------------------------------------------
+    - name: Apply Debian release flavour
+      run: |
+        set -eux
+        FLAVOUR_DIR="packaging/flavours/$DEBIAN_RELEASE"
+        if [ -d "$FLAVOUR_DIR" ]; then
+          echo ">>> Applying flavour overrides from $FLAVOUR_DIR"
+          if [ -f "$FLAVOUR_DIR/control" ]; then
+            cp -a "$FLAVOUR_DIR/control" build/nav/debian/control
+          fi
+          if [ -f "$FLAVOUR_DIR/changelog" ]; then
+            cp -a "$FLAVOUR_DIR/changelog" build/nav/debian/changelog
+          fi
+        else
+          echo ">>> No flavour dir for '$DEBIAN_RELEASE'; using shared root files."
+        fi
 
     # ------------------------------------------------------------------
     # Resolve the package version.
@@ -134,8 +198,15 @@ jobs:
     - name: Build Docker build environment
       run: |
         set -eux
+        # Prefer the per-release flavour Dockerfile; fall back to the shared one.
+        DOCKERFILE="packaging/Dockerfile"
+        if [ -f "packaging/flavours/$DEBIAN_RELEASE/Dockerfile" ]; then
+          DOCKERFILE="packaging/flavours/$DEBIAN_RELEASE/Dockerfile"
+        fi
+        echo ">>> Using Dockerfile: $DOCKERFILE"
         docker build \
           --build-arg "DEBIAN_RELEASE=$DEBIAN_RELEASE" \
+          -f "$DOCKERFILE" \
           -t "nav-debbuild-$DEBIAN_RELEASE" \
           packaging
 

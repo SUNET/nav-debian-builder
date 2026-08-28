@@ -6,3 +6,5 @@ nav.postinst.debhelper
 nav.postrm.debhelper
 nav.prerm.debhelper
 nav.substvars
+multi_release_strategy.md
+porting_debian_release.md
