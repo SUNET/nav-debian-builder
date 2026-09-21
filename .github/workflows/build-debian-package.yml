@@ -21,7 +21,7 @@ on:
         required: false
         default: ''
       upstream_ref:
-        description: 'Branch/tag/commit of Uninett/nav to build.'
+        description: 'Branch/tag/commit of SUNET/nav to build.'
         required: false
         default: 'master'
       message:
@@ -84,11 +84,11 @@ jobs:
     env:
       # Mirrors the defaults / env of build-from-git-source.sh. Inputs override
       # them when the workflow is triggered manually; on push the defaults apply.
-      UPSTREAM_URL: 'https://github.com/Uninett/nav.git'
+      UPSTREAM_URL: 'https://github.com/SUNET/nav.git'
       UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'master' }}
       DEBIAN_RELEASE: ${{ matrix.debian_release }}
       MESSAGE: ${{ github.event.inputs.message || 'Automated GitHub build' }}
-      DEBEMAIL: 'noreply@uninett.no'
+      DEBEMAIL: 'noreply@sunet.se'
       DEBFULLNAME: 'Automated GitHub build'
 
     steps:
